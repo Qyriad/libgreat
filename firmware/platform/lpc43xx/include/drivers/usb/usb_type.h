@@ -268,6 +268,7 @@ typedef struct {
 typedef struct usb_endpoint_t usb_endpoint_t;
 struct usb_endpoint_t {
 	usb_setup_t setup;
+	usb_setup_t previous_setup;
 	uint8_t buffer[8];	// Buffer for use during IN stage.
 	const uint_fast8_t address;
 	uint16_t max_packet_size;

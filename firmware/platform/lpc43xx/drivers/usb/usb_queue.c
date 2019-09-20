@@ -196,14 +196,24 @@ int usb_transfer_schedule_ack(
 
 
 /* Called when an endpoint might have completed a transfer */
-static void usb_queue_clean_up_transfers(usb_endpoint_t const * endpoint, bool include_active)
+static void usb_queue_clean_up_transfers(usb_endpoint_t *endpoint, bool include_active)
 {
+		static bool in_progress = false;
+
+		if (in_progress) {
+			return;
+		}
+
+
 		usb_queue_t* const queue = endpoint_queue(endpoint);
 		if (queue == NULL) {
 			pr_error("usb error: tried to clean up an endpoint (%d) with no queue!\n", endpoint->address);
+			return;
 		}
 
 		usb_transfer_t* transfer = queue->active;
+
+		in_progress = true;
 
 		while (transfer != NULL) {
 				uint8_t status = transfer->td.total_bytes;
@@ -237,11 +247,42 @@ static void usb_queue_clean_up_transfers(usb_endpoint_t const * endpoint, bool i
 					if (!include_active && td_is_active) {
 						break;
 					} else {
+
+						// If this is a control OUT packet, we need a special case: some Linux drivers
+						// will omit ZLPs at the end of control requests that carry setup.length data.
+						// We'll need to issue completions for those requests anyway.
+						if (false && (endpoint->address == 0)) {
+							pr_info("Max length is %d, total bytes is %d, setup length is %d\n", transfer->maximum_length,
+									transfer->td.total_bytes_without_flags, endpoint->previous_setup.length);
+							pr_info("Setup request number %d\n", endpoint->setup.request);
+
+							//if (transfer->maximum_length == transfer->td.total_bytes_without_flags) {
+							//if (0 == transfer->td.total_bytes_without_flags) {
+
+								// If the endpoint has a transfer complete callback, we'll need to notify it
+								// that we're considering the transfer complete. This will likely result in
+								// that handler calling this function again; but this function is idempotent
+								// due to the in_progress guard.
+								if (endpoint->transfer_complete) {
+									usb_setup_t current_setup = endpoint->setup;
+									endpoint->setup = endpoint->previous_setup;
+
+									pr_info("Calling transfer complete again\n");
+									endpoint->transfer_complete(endpoint);
+
+									endpoint->setup = current_setup;
+									break;
+								}
+
+							//}
+						}
+
 						// TODO: abstract me
 						// If the endpoint is still active, print an informational notice.
-						if (usb_endpoint_enabled(endpoint)) {
+						else if (usb_endpoint_enabled(endpoint)) {
 							int number = endpoint->address & 0x7f;
 							const char *direction = endpoint->address & 0x80 ? "IN" : "OUT";
+
 
 							pr_info("usb stack: discarding an active transcation on EP%d:%s!\n", number, direction);
 							pr_info("usb stack: (discard was likely due to overriding SETUP or STALL)\n");
@@ -267,6 +308,8 @@ static void usb_queue_clean_up_transfers(usb_endpoint_t const * endpoint, bool i
 				free_transfer(transfer);
 				transfer = next;
 		}
+
+		in_progress = false;
 }
 
 

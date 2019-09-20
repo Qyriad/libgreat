@@ -840,6 +840,12 @@ void usb_endpoint_init_without_descriptor(
 {
 	bool zero_length_terminate = (transfer_type == USB_TRANSFER_TYPE_CONTROL) && !manual_zlps;
 
+	if (endpoint->address == 0)
+	{
+		zero_length_terminate = false;
+	}
+
+
 	usb_endpoint_flush(endpoint);
 
 	// TODO: There are more capabilities to adjust based on the endpoint
@@ -932,10 +938,15 @@ static void usb_check_for_setup_events(usb_peripheral_t* const device) {
 
 				// TODO: Clean up this duplicated effort by providing
 				// a cleaner way to get the SETUP data.
+				usb_copy_setup(&endpoint->previous_setup, (uint8_t *)&endpoint->setup);
+				usb_copy_setup(&endpoint->in->previous_setup, (uint8_t *)&endpoint->setup);
+
 				usb_copy_setup(&endpoint->setup,
 						   usb_queue_head(endpoint->address, endpoint->device)->setup);
+
 				usb_copy_setup(&endpoint->in->setup,
 						   usb_queue_head(endpoint->address, endpoint->device)->setup);
+
 
 				// Mark the setup stage as handled, as we've grabbed its data.
 				// TODO: should this be after we flush the endpoints, too?
