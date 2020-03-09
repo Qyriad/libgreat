@@ -74,6 +74,12 @@ define_libgreat_module(dac
 	${PATH_LIBGREAT_FIRMWARE_PLATFORM_DRIVERS}/platform_dac.c
 )
 
+# ADC module
+define_libgreat_module(adc
+	${PATH_LIBGREAT_FIRMWARE_DRIVERS}/adc.c
+	${PATH_LIBGREAT_FIRMWARE_PLATFORM_DRIVERS}/platform_adc.c
+)
+
 # GPIO module.
 define_libgreat_module(sgpio
 	${PATH_LIBGREAT_FIRMWARE_PLATFORM_DRIVERS}/sgpio.c
