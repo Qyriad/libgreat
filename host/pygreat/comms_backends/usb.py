@@ -19,12 +19,110 @@ import platform
 from ..comms import CommsBackend
 from ..errors import DeviceNotFoundError
 
+class USBBackend:
+    """ Provides a common API for talking to libgreat devices over USB using a PyUSB-style API,
+    but abstracting the USB backend.
+    """
+
+    @classmethod
+    def create_appropriate_backend(cls, override=None, *find_args, **find_kwargs) -> USBBackend:
+
+        backend = None
+
+        for subclass in cls.__subclasses__():
+
+            try:
+                backend = subclass(*find_args, **find_kwargs)
+            except ImportError:
+                pass
+
+
+        raise EnvironmentError('No supported USB backends found. Install pyusb or python-libusb1?')
+
+
+    def find(self, *args, **kwargs):
+        raise NotImplementedError()
+
+    def ctrl_transfer(self, bmRequestType, bRequest, wValue=0, wIndex=0, data_or_wLength=None, timeout=1000):
+        raise NotImplementedError()
+
+    def read(self, endpoint, size, timeout=1000):
+        raise NotImplementedError()
+
+    def write(self, endpoint, data, timeout=1000):
+        raise NotImplementedError()
+
+    def get_active_configuration(self):
+        raise NotImplementedError()
+
+    def set_active_configuration(self, configuration=None):
+        raise NotImplementedError()
+
+    def claim_interface(self, interface_number):
+        raise NotImplementedError()
+
+    def is_kernel_driver_active(self, interface_number):
+        raise NotImplementedError()
+
+
+class PyUSBBackend(USBBackend):
+
+    def __init__(self, *find_args, **find_kwargs):
+
+        import usb
+        self.api = usb
+
+        # Connect to the first available device.
+        try:
+            self.device = self.api.core.find(*find_args, **find_kwargs)
+        except self.api.core.USBError as e:
+            # On some platforms, providing identifiers that don't match with any
+            # real device produces a USBError/Pipe Error. We'll convert it into a
+            # DeviceNotFoundError.
+            if e.errno == errno.EPIPE:
+                raise DeviceNotFoundError()
+            else:
+                raise e
+
+        # If we couldn't find a board, bail out early.
+        if self.device is None:
+            raise DeviceNotFoundError()
+
+
+    def get_active_configuration(self):
+        return self.device.get_active_configuration()
+
+    def set_active_configuration(self, configuration=None):
+        return self.device.set_configuration(configuration)
+
+    def claim_interface(self, interface_number):
+        return self.api.util.claim_interface(self._device, interface_number)
+
+    def release_interface(self, interface_number):
+        return self.api.util.claim_interface(self._device, interface_number)
+
+    def is_kernel_driver_active(self, interface_number):
+        return self.device.is_kernel_driver_active(interface_number)
+
 
 class USBCommsBackend(CommsBackend):
     """
     Class representing an abstract communications channel used to
     connect with a libgreat board.
     """
+
+    ENDPOINT_OUT    = 0x00
+    ENDPOINT_IN     = 0x80
+
+    TYPE_STANDARD   = 0
+    TYPE_CLASS      = 0x20
+    TYPE_VENDOR     = 0x40
+    TYPE_RESERVED   = 0x60
+
+    RECIP_DEVICE    = 0x00
+    RECIP_INTERFACE = 0x01
+    RECIP_ENDPOINT  = 0x02
+    RECIP_OTHER     = 0x03
 
     """ The request number for issuing vendor-request encapsulated libgreat commands. """
     LIBGREAT_REQUEST_NUMBER = 0x65
@@ -73,26 +171,14 @@ class USBCommsBackend(CommsBackend):
         to a more specific board by serial number.
         """
 
+        self.backend = USBBackend.create_appropriate_backend()
+
         # Zero pad serial numbers to 32 characters to match those
         # provided by the USB descriptors
         if 'serial_number' in device_identifiers and len(device_identifiers['serial_number']) < 32:
             device_identifiers['serial_number'] = device_identifiers['serial_number'].zfill(32)
 
-        # Connect to the first available device.
-        try:
-            self.device = usb.core.find(**device_identifiers)
-        except usb.core.USBError as e:
-            # On some platforms, providing identifiers that don't match with any
-            # real device produces a USBError/Pipe Error. We'll convert it into a
-            # DeviceNotFoundError.
-            if e.errno == errno.EPIPE:
-                raise DeviceNotFoundError()
-            else:
-                raise e
-
-        # If we couldn't find a board, bail out early.
-        if self.device is None:
-            raise DeviceNotFoundError()
+        self.backend = USBBackend.create_appropriate_backend(find_kwargs=device_identifiers)
 
         # For now, supported boards provide a single configuration, so we
         # can accept the first configuration provided. If the device isn't
@@ -102,8 +188,9 @@ class USBCommsBackend(CommsBackend):
         # doesn't support this, and macOS considers setting the device's configuration
         # grabbing an exclusive hold on the device. Both set the configuration for us,
         # so this is skipped.
-        if not self.device.get_active_configuration():
-            self.device.set_configuration()
+        # if not self.device.get_active_configuration():
+        if not self.backend.get_active_configuration():
+            self.backend.set_configuration()
 
         # Start off with no knowledge of the device's state.
         self._last_command_arguments = None
@@ -138,7 +225,7 @@ class USBCommsBackend(CommsBackend):
 
         while True:
             try:
-                usb.util.claim_interface(self.device, 0)
+                self.backend.claim_interface(0)
                 return
             except usb.core.USBError as e:
 
@@ -168,7 +255,7 @@ class USBCommsBackend(CommsBackend):
             return
 
         # Release our control over interface #0.
-        usb.util.release_interface(self.device, 0)
+        self.backend.release_interface(0)
 
 
 
@@ -210,7 +297,7 @@ class USBCommsBackend(CommsBackend):
         For OUT requests:
             length_or_data -- The data to be sent to the device.
         """
-        return self.device.ctrl_transfer(
+        return self.backend.ctrl_transfer(
             direction | usb.TYPE_VENDOR | usb.RECIP_DEVICE,
             request, value, index, length_or_data, timeout)
 
@@ -348,8 +435,8 @@ class USBCommsBackend(CommsBackend):
                     # Set the FLAG_SKIP_RESPONSE flag if we don't expect a response back from the device.
                     flags = self.LIBGREAT_FLAG_SKIP_RESPONSE if skip_reading_response else 0
 
-                    self.device.ctrl_transfer(
-                        usb.ENDPOINT_OUT | usb.TYPE_VENDOR | usb.RECIP_ENDPOINT,
+                    self.backend.ctrl_transfer(
+                        self.ENDPOINT_OUT | self.TYPE_VENDOR | self.RECIP_ENDPOINT,
                         self.LIBGREAT_REQUEST_NUMBER, self.LIBGREAT_VALUE_EXECUTE, flags, to_send, timeout)
 
                     # If we're skipping reading a response, return immediately.
@@ -366,7 +453,7 @@ class USBCommsBackend(CommsBackend):
 
                 # ... and read any response the device has prepared for us.
                 response = self.device.ctrl_transfer(
-                    usb.ENDPOINT_IN | usb.TYPE_VENDOR | usb.RECIP_ENDPOINT,
+                    self.ENDPOINT_IN | self.TYPE_VENDOR | self.RECIP_ENDPOINT,
                     self.LIBGREAT_REQUEST_NUMBER, self.LIBGREAT_VALUE_EXECUTE, flags, max_response_length, comms_timeout)
 
                 # If we were passed an encoding, attempt to decode the response data.
@@ -409,13 +496,13 @@ class USBCommsBackend(CommsBackend):
 
         # Create a quick function to issue the abort request.
         execute_abort = lambda device : device.ctrl_transfer(
-                usb.ENDPOINT_IN | usb.TYPE_VENDOR | usb.RECIP_ENDPOINT,
+                self.ENDPOINT_IN | self.TYPE_VENDOR | self.RECIP_ENDPOINT,
                 self.LIBGREAT_REQUEST_NUMBER, self.LIBGREAT_VALUE_CANCEL, 0,
                 self.LIBGREAT_ERRNO_SIZE, timeout)
 
         # And try executing the abort progressively, multiple times.
         try:
-            result = execute_abort(self.device)
+            result = execute_abort(self.backend)
         except:
             if retry_delay:
                 time.sleep(retry_delay)
@@ -440,7 +527,7 @@ class USBCommsBackend(CommsBackend):
         USB_ERROR_NO_SUCH_DEVICE = 19
 
         try:
-            self.device.is_kernel_driver_active(0)
+            self.backend.is_kernel_driver_active(0)
             return True
         except usb.core.USBError as e:
             return e.errno != USB_ERROR_NO_SUCH_DEVICE
