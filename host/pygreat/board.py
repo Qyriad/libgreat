@@ -238,6 +238,7 @@ class GreatBoard(object):
 
         # Get an object that allows easy access to each of our APIs.
         self.apis = self.comms.generate_api_object()
+        self.async_apis = self.comms.generate_async_api_object()
 
         # TODO: optionally use the core API to discover other APIs
 
